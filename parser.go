@@ -10,6 +10,10 @@ import (
 	"os"
 )
 
+import (
+	"utils"
+)
+
 const (
 	//LOG_EVENT_TYPES      = 35 //不同版本地 Mysql 可能有所不同 TODO 做成可配置地 5.6
 	LOG_EVENT_TYPES      = 27 //不同版本地 Mysql 可能有所不同 TODO 做成可配置地 5.5
@@ -18,6 +22,71 @@ const (
 
 var (
 	BINLOG_MAGIC_NUM = []byte{0xfe, 0x62, 0x69, 0x6e}
+)
+
+const (
+	/*
+		Every time you update this enum (when you add a type), you have to
+		fix Format_description_log_event::Format_description_log_event().
+	*/
+	UNKNOWN_EVENT      = 0
+	START_EVENT_V3     = 1
+	QUERY_EVENT        = 2
+	STOP_EVENT         = 3
+	ROTATE_EVENT       = 4
+	INTVAR_EVENT       = 5
+	LOAD_EVENT         = 6
+	SLAVE_EVENT        = 7
+	CREATE_FILE_EVENT  = 8
+	APPEND_BLOCK_EVENT = 9
+	EXEC_LOAD_EVENT    = 10
+	DELETE_FILE_EVENT  = 11
+	/*
+		NEW_LOAD_EVENT is like LOAD_EVENT except that it has a longer
+		sql_ex allowing multibyte TERMINATED BY etc; both types share the
+		same class (Load_log_event)
+	*/
+	NEW_LOAD_EVENT           = 12
+	RAND_EVENT               = 13
+	USER_VAR_EVENT           = 14
+	FORMAT_DESCRIPTION_EVENT = 15
+	XID_EVENT                = 16
+	BEGIN_LOAD_QUERY_EVENT   = 17
+	EXECUTE_LOAD_QUERY_EVENT = 18
+
+	TABLE_MAP_EVENT = 19
+
+	/*
+		These event numbers were used for 5.1.0 to 5.1.15 and are
+		therefore obsolete.
+	*/
+	PRE_GA_WRITE_ROWS_EVENT  = 20
+	PRE_GA_UPDATE_ROWS_EVENT = 21
+	PRE_GA_DELETE_ROWS_EVENT = 22
+
+	/*
+		These event numbers are used from 5.1.16 and forward
+	*/
+	WRITE_ROWS_EVENT  = 23
+	UPDATE_ROWS_EVENT = 24
+	DELETE_ROWS_EVENT = 25
+
+	/*
+		Something out of the ordinary happened on the master
+	*/
+	INCIDENT_EVENT = 26
+
+	/*
+		Heartbeat event to be send by master at its idle time
+		to ensure master's online status to slave
+	*/
+	HEARTBEAT_LOG_EVENT = 27
+
+	/*
+		Add new events here - right above this comment!
+		Existing events (except ENUM_END_EVENT) should never change their numbers
+	*/
+
 )
 
 type EventHeader struct {
@@ -31,10 +100,15 @@ type EventHeader struct {
 
 type DescEventData struct {
 	BinlogVersion   uint16
-	ServerVersion   [50]byte
+	ServerVersion   [50]byte `field_style:"string"`
 	CreateTimestamp uint32
 	HeaderLength    uint8
-	PostHeader      [LOG_EVENT_TYPES]byte
+	PostHeader      [LOG_EVENT_TYPES]byte `field_ignore:"ignore"`
+}
+
+type QueryLogEventData struct {
+	FixedPart QueryLogEventFixedData
+	VarPart   QueryLogEventVarData
 }
 
 type QueryLogEventFixedData struct {
@@ -46,9 +120,22 @@ type QueryLogEventFixedData struct {
 }
 
 type QueryLogEventVarData struct {
-	StatusVariables []byte //状态变量，长度有 QueryLogEventFixedDatastruct.StatusVarBlockLen 决定
-	DatabaseName    []byte //数据库名 0字节结尾
-	SQLStatement    []byte //SQL语句，log 的总长度有 EventHeader 给出
+	StatusVariables []byte `field_style:"string"` //状态变量，长度有 QueryLogEventFixedDatastruct.StatusVarBlockLen 决定
+	DatabaseName    []byte `field_style:"string"` //数据库名 0字节结尾
+	SQLStatement    []byte `field_style:"string"` //SQL语句，log 的总长度由 EventHeader.EventLength 给出，再减去其他部分长度得到 SQL 语句长度
+}
+
+type XidLogEventData struct {
+	XID uint64 //事务ID
+}
+
+type IntvarLogEventData struct {
+	Type  uint8  //A value indicating the variable type: LAST_INSERT_ID_EVENT = 1 or INSERT_ID_EVENT = 2.
+	Value uint64 //last insert id or auto increment column
+}
+
+type BinLogEventData interface {
+	//TODO more API
 }
 
 func main() {
@@ -68,14 +155,27 @@ func main() {
 		panic(err)
 	}
 
-	descHeader, descEvent, _ := parser.ParseFDE()
+	var header *EventHeader
+	//for i := 1; i < 33; i++ {
+	for {
+		if header, err = parser.ParseEventHeader(); err != nil {
+			if err.Error() == "unexpected EOF" {
+				fmt.Println("End of Log")
+			} else {
+				fmt.Println(err)
+			}
+			return
+		}
+		fmt.Println("***********")
+		fmt.Printf("%s\n", TypeCode2String(header.TypeCode))
+		utils.SmartPrint(header)
 
-	fmt.Printf("%v\n", descHeader)
-	fmt.Printf("%v\n", descEvent)
-
-	header, fixedData, varData, err := parser.ParseQueryLogEvent()
-	fmt.Printf("%v\n %v\n dbname %s status %v\n sql %v\n", header, fixedData,
-		varData.DatabaseName, varData.StatusVariables, varData.SQLStatement)
+		data, _ := parser.ParseLogEventData(header.TypeCode, header)
+		//PrettyPrint(data)
+		utils.SmartPrint(data)
+		//fmt.Println(data)
+		fmt.Println("***********")
+	}
 
 }
 
@@ -112,10 +212,20 @@ func (parser *Parser) ParseFDE() (descEventHeader *EventHeader, descEventData *D
 	return descEventHeader, descEventData, err
 }
 
+func (parser *Parser) ParseFDEData() (*DescEventData, error) {
+	var data DescEventData
+	var err error
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
+		return nil, err
+	}
+	//FDE 以外的 log event 头 可能有扩展字段，故头的总长度由 FDE 中的HeaderLength 指定
+	parser.HeaderLen = data.HeaderLength
+	return &data, nil
+}
+
 func (parser *Parser) ParseEventHeader() (*EventHeader, error) {
 	header := &EventHeader{}
 	var err error
-
 	err = binary.Read(parser.dataSource, binary.LittleEndian, header)
 	return header, err
 }
@@ -130,44 +240,163 @@ func (parser *Parser) ParseEventExtraHeader() ([]byte, error) {
 	return extHeader, err
 }
 
-func (parser *Parser) ParseQueryLogEvent() (*EventHeader, *QueryLogEventFixedData, *QueryLogEventVarData, error) {
-	var header EventHeader
-	var fixedData QueryLogEventFixedData
-	var varData QueryLogEventVarData
+func (parser *Parser) ParseQueryLogEvent(header *EventHeader) (*QueryLogEventData, error) {
+	var data QueryLogEventData
 	var err error
 	var size int
-	size = binary.Size(header) + binary.Size(fixedData)
-	if err = binary.Read(parser.dataSource, binary.LittleEndian, &header); err != nil {
+	size = binary.Size(header) + binary.Size(data.FixedPart)
+
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data.FixedPart); err != nil {
 		goto ERR
 	}
 
-	if err = binary.Read(parser.dataSource, binary.LittleEndian, &fixedData); err != nil {
-		goto ERR
-	}
-
-	fmt.Println("variables block len", fixedData.StatusVarBlockLen)
-	if fixedData.StatusVarBlockLen > 0 {
-		size += int(fixedData.StatusVarBlockLen)
-		varData.StatusVariables = make([]byte, fixedData.StatusVarBlockLen)
-		if _, err = io.ReadFull(parser.dataSource, varData.StatusVariables); err != nil {
+	if data.FixedPart.StatusVarBlockLen > 0 {
+		size += int(data.FixedPart.StatusVarBlockLen)
+		data.VarPart.StatusVariables = make([]byte, data.FixedPart.StatusVarBlockLen)
+		if _, err = io.ReadFull(parser.dataSource, data.VarPart.StatusVariables); err != nil {
 			goto ERR
 		}
 	}
 
-	fmt.Println("dbname len", fixedData.DatabaseNameLen)
-	size += int(fixedData.DatabaseNameLen)
-	varData.DatabaseName = make([]byte, fixedData.DatabaseNameLen)
-	if _, err = io.ReadFull(parser.dataSource, varData.DatabaseName); err != nil {
+	size += int(data.FixedPart.DatabaseNameLen)
+	data.VarPart.DatabaseName = make([]byte, data.FixedPart.DatabaseNameLen)
+	if _, err = io.ReadFull(parser.dataSource, data.VarPart.DatabaseName); err != nil {
 		goto ERR
 	}
 
-	varData.SQLStatement = make([]byte, header.EventLength-uint32(size))
-	if _, err = io.ReadFull(parser.dataSource, varData.SQLStatement); err != nil {
+	data.VarPart.SQLStatement = make([]byte, header.EventLength-uint32(size))
+	if _, err = io.ReadFull(parser.dataSource, data.VarPart.SQLStatement); err != nil {
 		panic(err)
 		goto ERR
 	}
 
-	return &header, &fixedData, &varData, err
+	return &data, err
 ERR:
-	return nil, nil, nil, err
+	return nil, err
+}
+
+func (parser *Parser) ParseIntValLogEvent() (*IntvarLogEventData, error) {
+	var data IntvarLogEventData
+	var err error
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
+		goto ERR
+	}
+	return &data, nil
+ERR:
+	return nil, err
+}
+
+func (parser *Parser) ParseXIDLogEvent() (*XidLogEventData, error) {
+	var data XidLogEventData
+	var err error
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
+		goto ERR
+	}
+	return &data, nil
+ERR:
+	return nil, err
+}
+
+type RotateLogEventData struct {
+	FirstLogPos uint64 //下一个文件中，第一个日志的其实位置
+	NextLogName []byte `field_style:"string"`
+}
+
+func (parser *Parser) ParseRotateLogEvent(header *EventHeader) (*RotateLogEventData, error) {
+	var data RotateLogEventData
+	var err error
+	varPartSize := header.EventLength - uint32(binary.Size(data.FirstLogPos))
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data.FirstLogPos); err != nil {
+		goto ERR
+	}
+	if data.NextLogName, err = parser.dataSource.Peek(int(varPartSize)); err != nil {
+		goto ERR
+	}
+	return &data, nil
+ERR:
+	//return nil, err
+	return &data, err
+}
+
+func (parser *Parser) ParseLogEventData(code uint8, header *EventHeader) (BinLogEventData, error) {
+	switch code {
+	case UNKNOWN_EVENT:
+		return nil, errors.New("can not parse unkonw log event type")
+	case START_EVENT_V3:
+		return nil, errors.New("unsupport event type *yet*")
+	case QUERY_EVENT:
+		return parser.ParseQueryLogEvent(header)
+	case STOP_EVENT:
+	case ROTATE_EVENT:
+		return parser.ParseRotateLogEvent(header)
+	case INTVAR_EVENT:
+		return parser.ParseIntValLogEvent()
+	case LOAD_EVENT:
+	case SLAVE_EVENT:
+	case CREATE_FILE_EVENT:
+	case APPEND_BLOCK_EVENT:
+	case EXEC_LOAD_EVENT:
+	case DELETE_FILE_EVENT:
+	case NEW_LOAD_EVENT:
+	case RAND_EVENT:
+	case USER_VAR_EVENT:
+	case FORMAT_DESCRIPTION_EVENT:
+		return parser.ParseFDEData()
+	case XID_EVENT:
+		return parser.ParseXIDLogEvent()
+	case BEGIN_LOAD_QUERY_EVENT:
+	case EXECUTE_LOAD_QUERY_EVENT:
+	case TABLE_MAP_EVENT:
+	case PRE_GA_WRITE_ROWS_EVENT:
+	case PRE_GA_UPDATE_ROWS_EVENT:
+	case PRE_GA_DELETE_ROWS_EVENT:
+	case WRITE_ROWS_EVENT:
+	case UPDATE_ROWS_EVENT:
+	case DELETE_ROWS_EVENT:
+	case INCIDENT_EVENT:
+	case HEARTBEAT_LOG_EVENT:
+	default:
+		panic("undefine type code for mysql 5.5")
+	}
+	return nil, errors.New("unsupport event type *yet*")
+}
+
+func TypeCode2String(code uint8) string {
+	switch code {
+	case 0:
+		return "UNKONW"
+	case 1:
+		return "START_EVENT_V3"
+	case 2:
+		return "QUERY_EVENT"
+	case 3:
+		return "STOP_EVENT"
+	case 4:
+		return "ROTATE_EVENT"
+	case 5:
+		return "INTVAR_EVENT"
+	case 6:
+		return "LOAD_EVENT"
+	case 7:
+		return "SLAVE_EVENT"
+	case 8:
+		return "CREATE_FILE_EVENT"
+	case 9:
+		return "APPEND_BLOCK_EVENT"
+	case 10:
+		return "EXEC_LOAD_EVENT"
+	case 11:
+		return "DELETE_FILE_EVENT"
+	case 12:
+		return "NEW_LOAD_EVENT"
+	case 13:
+		return "RAND_EVENT"
+	case 14:
+		return "USER_VAR_EVENT"
+	case 15:
+		return "FORMAT_DESCRIPTION_EVENT"
+	case 16:
+		return "XID_EVENT"
+	}
+	panic("unsupported type code yet")
 }
