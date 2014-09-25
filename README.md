@@ -2,7 +2,7 @@ binlog_parser
 =============
 
 implement mysql binlog parser in golang
-upder developing
+under developing
 
 Go 实现的 mysql binlog 解析器
 开发中
