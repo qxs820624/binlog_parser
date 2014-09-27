@@ -193,25 +193,6 @@ func (parser *Parser) ParseMagicNum() (err error) {
 	return err
 }
 
-/*
-解析 Format Description Event
-http://dev.mysql.com/doc/internals/en/binary-log-versions.html
-FDE地头和其他 Event 地头地差别在于： FDE 不可能有 ExtraHeaders ，即长度是固定 19 bytes
-*/
-func (parser *Parser) ParseFDE() (descEventHeader *EventHeader, descEventData *DescEventData, err error) {
-	descEventHeader = &EventHeader{}
-	descEventData = &DescEventData{}
-
-	if err = binary.Read(parser.dataSource, binary.LittleEndian, descEventHeader); err != nil {
-		return nil, nil, err
-	}
-
-	if err = binary.Read(parser.dataSource, binary.LittleEndian, descEventData); err != nil {
-		return nil, nil, err
-	}
-	return descEventHeader, descEventData, err
-}
-
 func (parser *Parser) ParseFDEData() (*DescEventData, error) {
 	var data DescEventData
 	var err error
@@ -269,6 +250,7 @@ func (parser *Parser) ParseQueryLogEvent(header *EventHeader) (*QueryLogEventDat
 		panic(err)
 		goto ERR
 	}
+	utils.DebugLog("parser query log", size)
 
 	return &data, err
 ERR:
@@ -305,17 +287,47 @@ type RotateLogEventData struct {
 func (parser *Parser) ParseRotateLogEvent(header *EventHeader) (*RotateLogEventData, error) {
 	var data RotateLogEventData
 	var err error
-	varPartSize := header.EventLength - uint32(binary.Size(data.FirstLogPos))
+	varPartSize := int(header.EventLength) - binary.Size(data.FirstLogPos)
 	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data.FirstLogPos); err != nil {
 		goto ERR
 	}
-	if data.NextLogName, err = parser.dataSource.Peek(int(varPartSize)); err != nil {
+	data.NextLogName = make([]byte, varPartSize)
+	if _, err = parser.dataSource.Read(data.NextLogName); err != nil {
 		goto ERR
 	}
 	return &data, nil
 ERR:
-	//return nil, err
-	return &data, err
+	return nil, err
+}
+
+type RandLogEventData struct {
+	FirstSeed  [8]byte `field_ignore:"ignore"`
+	SecondSeed [8]byte `field_ignore:"ignore"`
+}
+
+func (parser *Parser) ParserRandLogEvent(header *EventHeader) (*RandLogEventData, error) {
+	var (
+		data RandLogEventData
+		err  error
+	)
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
+		goto ERR
+	}
+	return &data, nil
+ERR:
+	return nil, err
+}
+
+type UnkonwEventData struct {
+	Data []byte `field_ignore:"ignore"`
+}
+
+func (parser *Parser) ParserUnkonwLogEvent(header *EventHeader) (BinLogEventData, error) {
+	var data UnkonwEventData
+	size := int(header.EventLength) - int(parser.HeaderLen)
+	data.Data = make([]byte, size)
+	err := binary.Read(parser.dataSource, binary.LittleEndian, data.Data)
+	return data, err
 }
 
 func (parser *Parser) ParseLogEventData(code uint8, header *EventHeader) (BinLogEventData, error) {
@@ -355,10 +367,8 @@ func (parser *Parser) ParseLogEventData(code uint8, header *EventHeader) (BinLog
 	case DELETE_ROWS_EVENT:
 	case INCIDENT_EVENT:
 	case HEARTBEAT_LOG_EVENT:
-	default:
-		panic("undefine type code for mysql 5.5")
 	}
-	return nil, errors.New("unsupport event type *yet*")
+	return parser.ParserUnkonwLogEvent(header)
 }
 
 func TypeCode2String(code uint8) string {
