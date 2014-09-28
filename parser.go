@@ -201,7 +201,6 @@ func (parser *Parser) ParseQueryLogEvent(header *EventHeader) (*QueryLogEventDat
 		panic(err)
 		goto ERR
 	}
-	utils.DebugLog("parser query log", size)
 
 	return &data, err
 ERR:
@@ -345,40 +344,62 @@ func (parser *Parser) ParseLogEventData(code uint8, header *EventHeader) (BinLog
 
 func TypeCode2String(code uint8) string {
 	switch code {
-	case 0:
+	case UNKNOWN_EVENT:
 		return "UNKONW"
-	case 1:
+	case START_EVENT_V3:
 		return "START_EVENT_V3"
-	case 2:
+	case QUERY_EVENT:
 		return "QUERY_EVENT"
-	case 3:
+	case STOP_EVENT:
 		return "STOP_EVENT"
-	case 4:
+	case ROTATE_EVENT:
 		return "ROTATE_EVENT"
-	case 5:
+	case INTVAR_EVENT:
 		return "INTVAR_EVENT"
-	case 6:
+	case LOAD_EVENT:
 		return "LOAD_EVENT"
-	case 7:
+	case SLAVE_EVENT:
 		return "SLAVE_EVENT"
-	case 8:
+	case CREATE_FILE_EVENT:
 		return "CREATE_FILE_EVENT"
-	case 9:
+	case APPEND_BLOCK_EVENT:
 		return "APPEND_BLOCK_EVENT"
-	case 10:
+	case EXEC_LOAD_EVENT:
 		return "EXEC_LOAD_EVENT"
-	case 11:
+	case DELETE_FILE_EVENT:
 		return "DELETE_FILE_EVENT"
-	case 12:
+	case NEW_LOAD_EVENT:
 		return "NEW_LOAD_EVENT"
-	case 13:
+	case RAND_EVENT:
 		return "RAND_EVENT"
-	case 14:
+	case USER_VAR_EVENT:
 		return "USER_VAR_EVENT"
-	case 15:
+	case FORMAT_DESCRIPTION_EVENT:
 		return "FORMAT_DESCRIPTION_EVENT"
-	case 16:
+	case XID_EVENT:
 		return "XID_EVENT"
+	case BEGIN_LOAD_QUERY_EVENT:
+		return "BEGIN_LOAD_QUERY_EVENT"
+	case EXECUTE_LOAD_QUERY_EVENT:
+		return "EXECUTE_LOAD_QUERY_EVENT"
+	case TABLE_MAP_EVENT:
+		return "TABLE_MAP_EVENT"
+	case PRE_GA_WRITE_ROWS_EVENT:
+		return "PRE_GA_WRITE_ROWS_EVENT"
+	case PRE_GA_UPDATE_ROWS_EVENT:
+		return "PRE_GA_UPDATE_ROWS_EVENT"
+	case PRE_GA_DELETE_ROWS_EVENT:
+		return "PRE_GA_DELETE_ROWS_EVENT"
+	case WRITE_ROWS_EVENT:
+		return "WRITE_ROWS_EVENT"
+	case UPDATE_ROWS_EVENT:
+		return "UPDATE_ROWS_EVENT"
+	case DELETE_ROWS_EVENT:
+		return "DELETE_FILE_EVENT"
+	case INCIDENT_EVENT:
+		return "INCIDENT_EVENT"
+	case HEARTBEAT_LOG_EVENT:
+		return "HEARTBEAT_LOG_EVENT"
 	}
 	panic("unsupported type code yet")
 }
