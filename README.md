@@ -11,3 +11,6 @@ dependency
 依赖
 
 https://gist.github.com/sillyousu/0ad230d86baceca28387
+
+## todo
+1. 增加 row based 类型日志支持
