@@ -89,6 +89,20 @@ const (
 
 )
 
+type Parser struct {
+	dataSource *bufio.Reader
+	HeaderLen  uint8
+}
+
+func (parser *Parser) ParseMagicNum() (err error) {
+	data := make([]byte, 4)
+	err = binary.Read(parser.dataSource, binary.LittleEndian, data)
+	if err == nil && !bytes.Equal(data, BINLOG_MAGIC_NUM) {
+		err = errors.New("invalid binlog file")
+	}
+	return err
+}
+
 type EventHeader struct {
 	Timestamp    uint32
 	TypeCode     uint8
@@ -98,12 +112,45 @@ type EventHeader struct {
 	Flag         uint16
 }
 
+func (parser *Parser) ParseEventHeader() (*EventHeader, error) {
+	header := &EventHeader{}
+	var err error
+	err = binary.Read(parser.dataSource, binary.LittleEndian, header)
+	return header, err
+}
+
+//获取 extra header 如果有的话
+func (parser *Parser) ParseEventExtraHeader() ([]byte, error) {
+	if parser.HeaderLen <= EVENT_HEADER_FIX_LEN {
+		return nil, nil
+	}
+	extHeader := make([]byte, parser.HeaderLen-EVENT_HEADER_FIX_LEN)
+	err := binary.Read(parser.dataSource, binary.LittleEndian, extHeader)
+	return extHeader, err
+}
+
+//定义 Binlog 日志数据接口
+type BinLogEventData interface {
+	//TODO more API
+}
+
 type DescEventData struct {
 	BinlogVersion   uint16
 	ServerVersion   [50]byte `field_style:"string"`
 	CreateTimestamp uint32
 	HeaderLength    uint8
 	PostHeader      [LOG_EVENT_TYPES]byte `field_ignore:"ignore"`
+}
+
+func (parser *Parser) ParseFDEData() (*DescEventData, error) {
+	var data DescEventData
+	var err error
+	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
+		return nil, err
+	}
+	//FDE 以外的 log event 头 可能有扩展字段，故头的总长度由 FDE 中的HeaderLength 指定
+	parser.HeaderLen = data.HeaderLength
+	return &data, nil
 }
 
 type QueryLogEventData struct {
@@ -123,102 +170,6 @@ type QueryLogEventVarData struct {
 	StatusVariables []byte `field_style:"string"` //状态变量，长度有 QueryLogEventFixedDatastruct.StatusVarBlockLen 决定
 	DatabaseName    []byte `field_style:"string"` //数据库名 0字节结尾
 	SQLStatement    []byte `field_style:"string"` //SQL语句，log 的总长度由 EventHeader.EventLength 给出，再减去其他部分长度得到 SQL 语句长度
-}
-
-type XidLogEventData struct {
-	XID uint64 //事务ID
-}
-
-type IntvarLogEventData struct {
-	Type  uint8  //A value indicating the variable type: LAST_INSERT_ID_EVENT = 1 or INSERT_ID_EVENT = 2.
-	Value uint64 //last insert id or auto increment column
-}
-
-type BinLogEventData interface {
-	//TODO more API
-}
-
-func main() {
-	file, err := os.Open("mysql-bin.000001")
-	if err != nil {
-		panic(err)
-	}
-	defer file.Close()
-
-	buffReader := bufio.NewReader(file)
-
-	parser := &Parser{
-		dataSource: buffReader,
-	}
-
-	if err := parser.ParseMagicNum(); err != nil {
-		panic(err)
-	}
-
-	var header *EventHeader
-	//for i := 1; i < 33; i++ {
-	for {
-		if header, err = parser.ParseEventHeader(); err != nil {
-			if err.Error() == "unexpected EOF" {
-				fmt.Println("End of Log")
-			} else {
-				fmt.Println(err)
-			}
-			return
-		}
-		fmt.Println("***********")
-		fmt.Printf("%s\n", TypeCode2String(header.TypeCode))
-		utils.SmartPrint(header)
-
-		data, _ := parser.ParseLogEventData(header.TypeCode, header)
-		//PrettyPrint(data)
-		utils.SmartPrint(data)
-		//fmt.Println(data)
-		fmt.Println("***********")
-	}
-
-}
-
-type Parser struct {
-	dataSource *bufio.Reader
-	HeaderLen  uint8
-}
-
-func (parser *Parser) ParseMagicNum() (err error) {
-	data := make([]byte, 4)
-	err = binary.Read(parser.dataSource, binary.LittleEndian, data)
-	if err == nil && !bytes.Equal(data, BINLOG_MAGIC_NUM) {
-		err = errors.New("invalid binlog file")
-	}
-	return err
-}
-
-func (parser *Parser) ParseFDEData() (*DescEventData, error) {
-	var data DescEventData
-	var err error
-	if err = binary.Read(parser.dataSource, binary.LittleEndian, &data); err != nil {
-		return nil, err
-	}
-	//FDE 以外的 log event 头 可能有扩展字段，故头的总长度由 FDE 中的HeaderLength 指定
-	parser.HeaderLen = data.HeaderLength
-	return &data, nil
-}
-
-func (parser *Parser) ParseEventHeader() (*EventHeader, error) {
-	header := &EventHeader{}
-	var err error
-	err = binary.Read(parser.dataSource, binary.LittleEndian, header)
-	return header, err
-}
-
-//获取 extra header 如果有的话
-func (parser *Parser) ParseEventExtraHeader() ([]byte, error) {
-	if parser.HeaderLen <= EVENT_HEADER_FIX_LEN {
-		return nil, nil
-	}
-	extHeader := make([]byte, parser.HeaderLen-EVENT_HEADER_FIX_LEN)
-	err := binary.Read(parser.dataSource, binary.LittleEndian, extHeader)
-	return extHeader, err
 }
 
 func (parser *Parser) ParseQueryLogEvent(header *EventHeader) (*QueryLogEventData, error) {
@@ -257,6 +208,11 @@ ERR:
 	return nil, err
 }
 
+type IntvarLogEventData struct {
+	Type  uint8  //A value indicating the variable type: LAST_INSERT_ID_EVENT = 1 or INSERT_ID_EVENT = 2.
+	Value uint64 //last insert id or auto increment column
+}
+
 func (parser *Parser) ParseIntValLogEvent() (*IntvarLogEventData, error) {
 	var data IntvarLogEventData
 	var err error
@@ -266,6 +222,10 @@ func (parser *Parser) ParseIntValLogEvent() (*IntvarLogEventData, error) {
 	return &data, nil
 ERR:
 	return nil, err
+}
+
+type XidLogEventData struct {
+	XID uint64 //事务ID
 }
 
 func (parser *Parser) ParseXIDLogEvent() (*XidLogEventData, error) {
@@ -318,6 +278,17 @@ ERR:
 	return nil, err
 }
 
+type TableMapEventData struct {
+	TableId         [6]byte
+	Reserved        [2]byte `field_ignore:"ignore"`
+	DatabaseNameLen uint8
+	DatabaseName    []byte `field_style:"string"`
+	TableNameLen    uint8
+	TableName       []byte `field_style:"string"`
+	ColumnNum       int    //表的行数，TODO 不确定 size 是否未 int
+	ColumnBytes     []byte //一个 column 一个 byte
+}
+
 type UnkonwEventData struct {
 	Data []byte `field_ignore:"ignore"`
 }
@@ -351,6 +322,7 @@ func (parser *Parser) ParseLogEventData(code uint8, header *EventHeader) (BinLog
 	case DELETE_FILE_EVENT:
 	case NEW_LOAD_EVENT:
 	case RAND_EVENT:
+		return parser.ParserRandLogEvent(header)
 	case USER_VAR_EVENT:
 	case FORMAT_DESCRIPTION_EVENT:
 		return parser.ParseFDEData()
@@ -409,4 +381,42 @@ func TypeCode2String(code uint8) string {
 		return "XID_EVENT"
 	}
 	panic("unsupported type code yet")
+}
+
+func main() {
+	file, err := os.Open("mysql-bin.000001")
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	buffReader := bufio.NewReader(file)
+
+	parser := &Parser{
+		dataSource: buffReader,
+	}
+
+	if err := parser.ParseMagicNum(); err != nil {
+		panic(err)
+	}
+
+	var header *EventHeader
+	//for i := 1; i < 33; i++ {
+	for {
+		if header, err = parser.ParseEventHeader(); err != nil {
+			if err.Error() == "unexpected EOF" {
+				fmt.Println("End of Log")
+			} else {
+				fmt.Println(err)
+			}
+			return
+		}
+		fmt.Println("***********")
+		fmt.Printf("%s\n", TypeCode2String(header.TypeCode))
+		utils.SmartPrint(header)
+
+		data, _ := parser.ParseLogEventData(header.TypeCode, header)
+		utils.SmartPrint(data)
+		fmt.Println("***********")
+	}
 }
