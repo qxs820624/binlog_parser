@@ -425,11 +425,7 @@ func main() {
 	//for i := 1; i < 33; i++ {
 	for {
 		if header, err = parser.ParseEventHeader(); err != nil {
-			if err.Error() == "unexpected EOF" {
-				fmt.Println("End of Log")
-			} else {
-				fmt.Println(err)
-			}
+			fmt.Println(err)
 			return
 		}
 		fmt.Println("***********")
@@ -439,5 +435,18 @@ func main() {
 		data, _ := parser.ParseLogEventData(header.TypeCode, header)
 		utils.SmartPrint(data)
 		fmt.Println("***********")
+
+		if header.TypeCode == ROTATE_EVENT {
+			fileNameBytes := data.(*RotateLogEventData).NextLogName
+			fileName := string(fileNameBytes[:bytes.IndexByte(fileNameBytes, 0x00)])
+			file, err := os.Open(fileName)
+			if err == nil {
+				defer file.Close()
+				parser.dataSource = bufio.NewReader(file)
+				if err := parser.ParseMagicNum(); err != nil {
+					panic(err)
+				}
+			}
+		}
 	}
 }
