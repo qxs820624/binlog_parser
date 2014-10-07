@@ -1,4 +1,4 @@
-package main
+package binlog_parser
 
 import (
 	"bufio"
@@ -8,10 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-)
-
-import (
-	"utils"
+	"unicode"
 )
 
 const (
@@ -101,6 +98,25 @@ func (parser *Parser) ParseMagicNum() (err error) {
 		err = errors.New("invalid binlog file")
 	}
 	return err
+}
+
+type Event struct {
+	Header *EventHeader
+	Data   BinLogEventData
+}
+
+func SQLFilter(r rune) bool {
+	return !unicode.IsPrint(r)
+}
+
+func (event *Event) GetSQLStatement() (string, error) {
+	if event.Header.TypeCode != QUERY_EVENT {
+		return "", errors.New("Not Query Event")
+	}
+	data := event.Data.(*QueryLogEventData)
+
+	stmt := bytes.TrimFunc(data.VarPart.SQLStatement, SQLFilter)
+	return string(stmt), nil
 }
 
 type EventHeader struct {
@@ -404,12 +420,15 @@ func TypeCode2String(code uint8) string {
 	panic("unsupported type code yet")
 }
 
-func main() {
-	file, err := os.Open("mysql-bin.000001")
+/*
+解析 fileName 的日志内容
+flwRotateEvent 参数决定是否根据 RotateEvent 事件解析下一个 binlog
+*/
+func ParseLocalBinLog(fileName string, flwRotateEvent bool) (chn chan *Event, err error) {
+	file, err := os.Open(fileName)
 	if err != nil {
-		panic(err)
+		return
 	}
-	defer file.Close()
 
 	buffReader := bufio.NewReader(file)
 
@@ -417,36 +436,52 @@ func main() {
 		dataSource: buffReader,
 	}
 
-	if err := parser.ParseMagicNum(); err != nil {
-		panic(err)
+	if err = parser.ParseMagicNum(); err != nil {
+		return
 	}
 
+	chn = make(chan *Event)
+
 	var header *EventHeader
-	//for i := 1; i < 33; i++ {
-	for {
-		if header, err = parser.ParseEventHeader(); err != nil {
-			fmt.Println(err)
-			return
-		}
-		fmt.Println("***********")
-		fmt.Printf("%s\n", TypeCode2String(header.TypeCode))
-		utils.SmartPrint(header)
+	go func() {
+		for {
+			if header, err = parser.ParseEventHeader(); err != nil {
+				break
+			}
+			data, _ := parser.ParseLogEventData(header.TypeCode, header)
 
-		data, _ := parser.ParseLogEventData(header.TypeCode, header)
-		utils.SmartPrint(data)
-		fmt.Println("***********")
+			chn <- &Event{
+				Header: header,
+				Data:   data,
+			}
 
-		if header.TypeCode == ROTATE_EVENT {
-			fileNameBytes := data.(*RotateLogEventData).NextLogName
-			fileName := string(fileNameBytes[:bytes.IndexByte(fileNameBytes, 0x00)])
-			file, err := os.Open(fileName)
-			if err == nil {
-				defer file.Close()
-				parser.dataSource = bufio.NewReader(file)
-				if err := parser.ParseMagicNum(); err != nil {
-					panic(err)
+			if header.TypeCode == ROTATE_EVENT { //遇到 Rotate 说明日志已经读取该日志文件的最后一个 event
+				file.Close()
+				if !flwRotateEvent { //如果不跟随 Rotate 指示读取下一个日志文件的话则退出
+					err = nil
+					break
+				}
+				fmt.Println("follow rotate event and trying parse next binlog")
+				fileNameBytes := data.(*RotateLogEventData).NextLogName
+				fileName := string(fileNameBytes[:bytes.IndexByte(fileNameBytes, 0x00)])
+				file, err := os.Open(fileName)
+				if err == nil {
+					parser.dataSource = bufio.NewReader(file)
+					if err = parser.ParseMagicNum(); err != nil {
+						break
+					}
+				} else {
+					break
 				}
 			}
 		}
-	}
+		//if encounter error, break the loop, log error message and close the channel here
+		//it is caller's responsibility to recover from reading closed channel
+		file.Close()
+		fmt.Println("error:", err)
+		chn <- nil
+		close(chn)
+
+	}()
+	return chn, nil
 }
