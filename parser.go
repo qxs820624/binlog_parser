@@ -127,6 +127,10 @@ func (event *Event) GetPosition() (uint32, uint32) {
 	return event.Header.NextPosition - event.Header.EventLength, event.Header.NextPosition
 }
 
+func (event *Event) CheckLogType(typeCode uint8) bool {
+	return event.Header.TypeCode == typeCode
+}
+
 type EventHeader struct {
 	Timestamp    uint32
 	TypeCode     uint8
@@ -486,7 +490,6 @@ func ParseLocalBinLog(fileName string, flwRotateEvent bool) (chn chan *Event, er
 		//if encounter error, break the loop, log error message and close the channel here
 		//it is caller's responsibility to recover from reading closed channel
 		file.Close()
-		fmt.Println("error:", err)
 		chn <- nil
 		close(chn)
 
