@@ -48,9 +48,11 @@ func TestGetSQLStatement(t *testing.T) {
 				return
 			} else {
 				stmt, err := log.GetSQLStatement()
+				start, end := log.GetPosition()
 				if err == nil && stmt != "BEGIN" {
-					fmt.Print(log.Header.Timestamp, "\t")
-					fmt.Printf("%#v\n", stmt)
+					fmt.Print(log.GetTimestamp(), "\t")
+					fmt.Print("start: ", start, "\t\tend:", end, "\t\t")
+					fmt.Printf("%v\n", stmt)
 				}
 			}
 		case <-time.After(5 * time.Second):

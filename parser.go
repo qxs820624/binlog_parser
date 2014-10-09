@@ -119,6 +119,14 @@ func (event *Event) GetSQLStatement() (string, error) {
 	return string(stmt), nil
 }
 
+func (event *Event) GetTimestamp() int64 {
+	return int64(event.Header.Timestamp)
+}
+
+func (event *Event) GetPosition() (uint32, uint32) {
+	return event.Header.NextPosition - event.Header.EventLength, event.Header.NextPosition
+}
+
 type EventHeader struct {
 	Timestamp    uint32
 	TypeCode     uint8
